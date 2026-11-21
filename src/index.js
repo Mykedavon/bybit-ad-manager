@@ -22,7 +22,6 @@ const telegram = require('./telegram/bot');
 const db = require('./db/db');
 
 // ── Simple scheduler (no external dep) ─────────────────────
-// Runs fn every intervalMs. Prevents overlapping runs.
 function createLoop(name, intervalMs, fn) {
   let running = false;
   let timer = null;
@@ -127,8 +126,7 @@ function scheduleReconciliation() {
 async function main() {
   console.log('[startup] loading config…');
 
-  // 1. Start HTTP health endpoint IMMEDIATELY so Render sees a live service
-  //    even if Bybit/Telegram are slow or unreachable at boot.
+  // 1. Start HTTP health endpoint IMMEDIATELY
   const PORT = process.env.PORT || 3000;
   const httpServer = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -147,7 +145,12 @@ async function main() {
       console.log('[startup] ad mapping OK');
       return true;
     } catch (err) {
-      console.error('[startup] ad mapping failed —', err.message);
+      console.error('[startup] ad mapping failed — FULL ERROR:');
+      console.error('name:', err.name);
+      console.error('message:', err.message);
+      console.error('code:', err.code);
+      console.error('raw:', JSON.stringify(err.raw || err, null, 2));
+      console.error('stack:', err.stack);
       console.error('Will retry every 5 minutes. HTTP health endpoint still responds.');
       return false;
     }
@@ -234,16 +237,6 @@ async function main() {
       config.telegram.operationalRetentionMinutes
     ).catch(() => {});
   });
-
-
-  } catch (err) {
-  console.error('[startup] ad mapping failed — FULL ERROR:');
-  console.error('name:', err.name);
-  console.error('message:', err.message);
-  console.error('code:', err.code);
-  console.error('raw:', JSON.stringify(err.raw || err, null, 2));
-  console.error('stack:', err.stack);
-}
 
   process.on('unhandledRejection', (err) => {
     console.error('[unhandledRejection]', err);
