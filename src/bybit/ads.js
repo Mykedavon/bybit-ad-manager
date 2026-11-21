@@ -1,7 +1,7 @@
 // src/bybit/ads.js
 // Ad registry with hardcoded Ad IDs.
 // Unwraps the SDK's { ret_code, result: {...} } envelope.
-// Fails loudly on any error. Aborts immediately on rate limit.
+// Uses exponential backoff on Bybit's 10006 rate limit.
 
 const { client, BybitError } = require('./client');
 const db = require('../db/db');
@@ -31,21 +31,31 @@ async function mapRolesToAdIds() {
       throw new Error(`[ads] Missing hardcoded Ad ID for role "${role}".`);
     }
 
-    let raw;
-    try {
-      raw = await client.getAdInfo(adId);
-    } catch (err) {
-      if (err.message && err.message.includes('10006')) {
-        throw new Error(
-          `[ads] Rate limited by Bybit. Waiting for next 5-minute retry. Stopped at role: ${role}`
-        );
+    let raw = null;
+    let attempt = 0;
+    const maxAttempts = 5;
+
+    while (attempt < maxAttempts) {
+      try {
+        raw = await client.getAdInfo(adId);
+        break;
+      } catch (err) {
+        if (err.message && err.message.includes('10006')) {
+          attempt++;
+          const waitMs = Math.pow(2, attempt) * 1000;
+          console.log(`[ads] Rate limited on ${role}. Waiting ${waitMs / 1000}s (attempt ${attempt}/${maxAttempts})...`);
+          await sleep(waitMs);
+        } else {
+          throw new Error(`[ads] getAdInfo failed for ${role} (${adId}): ${err.message}`);
+        }
       }
-      throw new Error(`[ads] getAdInfo failed for ${role} (${adId}): ${err.message}`);
     }
 
-    // SDK wraps the ad data in { ret_code, ret_msg, result: {...} }
-    const data = raw.result || raw;
+    if (!raw) {
+      throw new Error(`[ads] Gave up on ${role} after ${maxAttempts} rate-limit retries.`);
+    }
 
+    const data = raw.result || raw;
     const token = data.tokenId || data.token || data.coin;
     const side = data.side !== undefined ? Number(data.side) : (role === ROLES.USDC_SELL ? 1 : 0);
     const price = Number(data.price) || 0;
