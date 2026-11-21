@@ -15,7 +15,7 @@ const p2p = new P2P({
 // Map your existing method calls to SDK methods
 const client = {
   // Ads
-  getMyAds: () => p2p.getAdsList({ page: 1, size: 20 }),
+  getMyAds: () => p2p.getAdsList({ page: '1', size: '20' }),
   getAdInfo: (itemId) => p2p.getAdDetails({ itemId: String(itemId) }),
   updateAd: (params) => p2p.updateAd(params),
   getAdsOnline: (params) => p2p.getOnlineAds(params),
