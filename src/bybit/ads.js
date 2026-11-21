@@ -1,6 +1,6 @@
 // src/bybit/ads.js
-// Ad registry: maps role → Bybit ad ID. Fetches ad details.
-// Provides read-modify-write update wrapper with verify-after-write.
+// Ad registry with hardcoded Ad IDs.
+// Bypasses the empty getAdsList() response by using the IDs you provide.
 
 const { client, BybitError } = require('./client');
 const db = require('../db/db');
@@ -14,74 +14,51 @@ const ROLES = {
   USDC_SELL: 'usdc_sell',
 };
 
-// ── Role → matching rules ────────────────────────────────────
-// Resilient to type/case differences in Bybit's response.
-const ROLE_MATCHERS = [
-  {
-    role: ROLES.USDT_BUY,
-    match: (ad) =>
-      ad.tokenId?.toUpperCase() === config.tokens.buy1?.toUpperCase() &&
-      Number(ad.side) === 0 &&
-      Math.abs(Number(ad.minAmount) - config.buy.minUsdtNgn) < 1,
-  },
-  {
-    role: ROLES.USDC_SMALL_BUY,
-    match: (ad) =>
-      ad.tokenId?.toUpperCase() === config.tokens.buy2?.toUpperCase() &&
-      Number(ad.side) === 0 &&
-      Math.abs(Number(ad.minAmount) - config.buy.minUsdcSmallNgn) < 1,
-  },
-  {
-    role: ROLES.USDC_LARGE_BUY,
-    match: (ad) =>
-      ad.tokenId?.toUpperCase() === config.tokens.buy3?.toUpperCase() &&
-      Number(ad.side) === 0 &&
-      Math.abs(Number(ad.minAmount) - config.buy.minUsdcLargeNgn) < 1,
-  },
-  {
-    role: ROLES.USDC_SELL,
-    match: (ad) =>
-      ad.tokenId?.toUpperCase() === config.tokens.sell?.toUpperCase() &&
-      Number(ad.side) === 1,
-  },
-];
+// ── HARDCODED AD IDs ────────────────────────────────────────
+// Paste your real Bybit Ad IDs here. Find them on the Bybit P2P page:
+// click each ad, look at the URL or ad details for the ID.
+const AD_IDS = {
+  [ROLES.USDT_BUY]: '2048155803803877376',
+  [ROLES.USDC_SMALL_BUY]: '2116820960323358720',
+  [ROLES.USDC_LARGE_BUY]: '2123476111959023616',
+  [ROLES.USDC_SELL]: '2116798411379228672',
+};
 
 // ── Map roles to ad IDs ─────────────────────────────────────
+// Uses hardcoded IDs. Fetches ad details once to populate the DB.
 async function mapRolesToAdIds() {
-  const result = await client.getMyAds();
-  const ads = result.items || [];
-
-  // Debug log — prints the raw ads so you can see exact field values.
-  console.log('[ads] Raw ads from Bybit:', JSON.stringify(ads, null, 2));
-
-  const mapping = {};
-
-  for (const matcher of ROLE_MATCHERS) {
-    const found = ads.find(matcher.match);
-    if (!found) {
+  // Validate that real IDs were provided
+  for (const [role, adId] of Object.entries(AD_IDS)) {
+    if (!adId || adId.startsWith('PASTE_')) {
       throw new Error(
-        `[ads] Could not find ad for role "${matcher.role}". ` +
-        `Check that the ad exists and its token/side/minAmount match config.`
+        `[ads] Missing hardcoded Ad ID for role "${role}". ` +
+        `Edit src/bybit/ads.js and replace the placeholder.`
       );
     }
-    mapping[matcher.role] = found.id;
   }
 
-  // Persist to DB
-  for (const [role, adId] of Object.entries(mapping)) {
-    const matcher = ROLE_MATCHERS.find((m) => m.role === role);
-    const ad = ads.find(matcher.match);
-    db.ads.upsert(
-      role,
-      adId,
-      ad.tokenId,
-      Number(ad.side),
-      Number(ad.price) || 0,
-      Number(ad.lastQuantity) || 0
-    );
+  // Fetch details for each ad and persist
+  for (const [role, adId] of Object.entries(AD_IDS)) {
+    try {
+      const info = await client.getAdInfo(adId);
+      db.ads.upsert(
+        role,
+        adId,
+        info.tokenId,
+        Number(info.side),
+        Number(info.price) || 0,
+        Number(info.lastQuantity) || 0
+      );
+      console.log(`[ads] Mapped ${role} → ${adId} (${info.tokenId}, price=${info.price})`);
+    } catch (err) {
+      console.error(`[ads] Failed to fetch details for ${role} (${adId}): ${err.message}`);
+      // Still store the ID so the bot doesn't crash, but log the error
+      db.ads.upsert(role, adId, 'UNKNOWN', 0, 0, 0);
+    }
   }
 
-  return mapping;
+  console.log('[ads] Hardcoded ad mapping complete.');
+  return AD_IDS;
 }
 
 // ── Get ad ID for a role ────────────────────────────────────
