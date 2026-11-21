@@ -2,6 +2,7 @@
 // 5-minute buy loop. Manages three buy ads.
 
 const { client } = require('../bybit/client');
+const { getOnlineAdsCached } = require('./priceCache');
 const ads = require('../bybit/ads');
 const inventory = require('./inventory');
 const override = require('./override');
@@ -15,7 +16,7 @@ let telegramNotifier = null;
 function setTelegramNotifier(fn) { telegramNotifier = fn; }
 
 async function fetchHighestGenuineBuyPrice(token) {
-  const result = await client.getAdsOnline({
+  const result = await getOnlineAdsCached({
     tokenId: token,
     side: '0',
     currencyId: 'NGN',

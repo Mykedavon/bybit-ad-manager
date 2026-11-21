@@ -2,6 +2,7 @@
 // 1-minute sell loop. Manages one USDC sell ad.
 
 const { client } = require('../bybit/client');
+const { getOnlineAdsCached } = require('./priceCache');
 const ads = require('../bybit/ads');
 const inventory = require('./inventory');
 const override = require('./override');
@@ -11,7 +12,7 @@ const config = require('../config');
 const { ROLES } = ads;
 
 async function fetchCheapestGenuineSellPrice() {
-  const result = await client.getAdsOnline({
+  const result = await getOnlineAdsCached({
     tokenId: config.tokens.sell,
     side: '1',
     currencyId: 'NGN',
@@ -86,6 +87,16 @@ async function runSellCycle() {
     log.availableUsdc = available;
   } catch (err) {
     return { ok: false, reason: 'balance_fetch_failed', error: err.message };
+  }
+
+  // Safety: never zero the ad based on a suspicious zero balance.
+  if (available === 0 && Number(currentAd.quantity) > 0) {
+    return {
+      ok: true,
+      action: 'skipped_zero_balance',
+      warning: 'availableUsdc=0 but ad has quantity. Skipping quantity edit.',
+      log,
+    };
   }
 
   const priceResult = await computeTargetPrice();
