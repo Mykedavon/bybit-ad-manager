@@ -1,11 +1,12 @@
 // src/index.js
 // Entry point. Starts the bot:
-//   1. Maps ad IDs to roles
+//   1. Maps ad IDs to roles (with retry)
 //   2. Launches Telegram
 //   3. Runs sell loop every 60s
 //   4. Runs buy loop every 5 min
 //   5. Runs daily report at 23:50 Lagos
-//   6. Handles graceful shutdown
+//   6. Serves HTTP health endpoint for Render Web Service
+//   7. Handles graceful shutdown
 
 const http = require('http');
 
@@ -37,7 +38,6 @@ function createLoop(name, intervalMs, fn) {
       console.log(`[${name}]`, JSON.stringify(result).slice(0, 500));
     } catch (err) {
       console.error(`[${name}] error:`, err.message);
-      // Alert owner on repeated failures
       telegram.send(
         config.telegram.ownerChatId,
         `⚠️ ${name} error: ${err.message}`,
@@ -51,7 +51,6 @@ function createLoop(name, intervalMs, fn) {
 
   return {
     start: () => {
-      // Run immediately once, then on interval
       tick();
       timer = setInterval(tick, intervalMs);
     },
@@ -63,7 +62,6 @@ function createLoop(name, intervalMs, fn) {
 }
 
 // ── Daily report scheduler ─────────────────────────────────
-// Runs at 23:50 Lagos time every day.
 function scheduleDailyReport() {
   const [hh, mm] = config.telegram.dailyReportTime.split(':').map(Number);
   let lastRunDate = null;
@@ -88,12 +86,10 @@ function scheduleDailyReport() {
     }
   };
 
-  // Check every 30 seconds
   return setInterval(check, 30 * 1000);
 }
 
 // ── Gate expiry scheduler ──────────────────────────────────
-// Every minute: expire stale price-gate offers and stale increments.
 function scheduleExpiryChecks() {
   return setInterval(async () => {
     try {
@@ -109,7 +105,6 @@ function scheduleExpiryChecks() {
 }
 
 // ── Reconciliation scheduler ───────────────────────────────
-// Every 30 min (configurable): compare internal records vs Bybit balances.
 function scheduleReconciliation() {
   return setInterval(async () => {
     try {
@@ -132,41 +127,81 @@ function scheduleReconciliation() {
 async function main() {
   console.log('[startup] loading config…');
 
-  // 1. Verify ad mapping
-  console.log('[startup] mapping ad IDs to roles…');
-  try {
-    await ads.mapRolesToAdIds();
-    console.log('[startup] ad mapping OK');
-  } catch (err) {
-    console.error('[startup] FATAL: ad mapping failed —', err.message);
-    console.error('Check that all four ads exist on Bybit with the expected token/side/minAmount.');
-    process.exit(1);
+  // 1. Start HTTP health endpoint IMMEDIATELY so Render sees a live service
+  //    even if Bybit/Telegram are slow or unreachable at boot.
+  const PORT = process.env.PORT || 3000;
+  const httpServer = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', time: Date.now() }));
+  });
+  httpServer.listen(PORT, () => {
+    console.log(`[http] health endpoint on port ${PORT}`);
+  });
+
+  // 2. Map ad IDs to roles. On failure, retry every 5 min — never exit.
+  let adMappingOk = false;
+  const tryMapAds = async () => {
+    try {
+      await ads.mapRolesToAdIds();
+      adMappingOk = true;
+      console.log('[startup] ad mapping OK');
+      return true;
+    } catch (err) {
+      console.error('[startup] ad mapping failed —', err.message);
+      console.error('Will retry every 5 minutes. HTTP health endpoint still responds.');
+      return false;
+    }
+  };
+
+  await tryMapAds();
+
+  let retryTimer = null;
+  if (!adMappingOk) {
+    retryTimer = setInterval(async () => {
+      const ok = await tryMapAds();
+      if (ok) {
+        clearInterval(retryTimer);
+        retryTimer = null;
+      }
+    }, 5 * 60 * 1000);
   }
 
-  // 2. Wire the Telegram notifier into buyManager
+  // 3. Wire Telegram notifier into buyManager
   buyManager.setTelegramNotifier(telegram);
 
-  // 3. Launch Telegram
-  await telegram.launch();
-  await telegram.sendStartupMessage();
+  // 4. Launch Telegram (guard so a bad token doesn't kill the HTTP server)
+  try {
+    await telegram.launch();
+    await telegram.sendStartupMessage();
+    console.log('[telegram] launch OK');
+  } catch (err) {
+    console.error('[telegram] launch failed —', err.message);
+    console.error('Continuing without Telegram. Fix TELEGRAM_* env vars and redeploy.');
+  }
 
-  // 4. Start loops
+  // 5. Start loops (they will no-op until ad mapping succeeds)
   const sellLoop = createLoop(
     'sell',
     config.sell.cycleSeconds * 1000,
-    () => sellManager.runSellCycle()
+    async () => {
+      if (!adMappingOk) return { skipped: 'ad_mapping_pending' };
+      return sellManager.runSellCycle();
+    }
   );
 
   const buyLoop = createLoop(
     'buy',
     config.buy.cycleMinutes * 60 * 1000,
-    () => buyManager.runBuyCycle()
+    async () => {
+      if (!adMappingOk) return { skipped: 'ad_mapping_pending' };
+      return buyManager.runBuyCycle();
+    }
   );
 
   sellLoop.start();
   buyLoop.start();
 
-  // 5. Start schedulers
+  // 6. Start schedulers
   const dailyReportTimer = scheduleDailyReport();
   const expiryTimer = scheduleExpiryChecks();
   const reconcileTimer = scheduleReconciliation();
@@ -181,7 +216,9 @@ async function main() {
     clearInterval(dailyReportTimer);
     clearInterval(expiryTimer);
     clearInterval(reconcileTimer);
-    telegram.stop();
+    if (retryTimer) clearInterval(retryTimer);
+    try { httpServer.close(); } catch (_) {}
+    try { telegram.stop(); } catch (_) {}
     setTimeout(() => process.exit(0), 500);
   };
 
