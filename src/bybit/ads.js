@@ -1,6 +1,6 @@
 // src/bybit/ads.js
 // Ad registry with hardcoded Ad IDs.
-// Fails loudly if any ad can't be loaded. Never writes dummy rows.
+// Fails loudly on any error. Aborts immediately on rate limit.
 
 const { client, BybitError } = require('./client');
 const db = require('../db/db');
@@ -20,7 +20,6 @@ const AD_IDS = {
   [ROLES.USDC_SELL]: '2116798411379228672',
 };
 
-// Delay helper — Bybit P2P rate limit is strict. Space out calls.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function mapRolesToAdIds() {
@@ -35,13 +34,16 @@ async function mapRolesToAdIds() {
     try {
       info = await client.getAdInfo(adId);
     } catch (err) {
+      if (err.message && err.message.includes('10006')) {
+        throw new Error(
+          `[ads] Rate limited by Bybit. Waiting for next 5-minute retry. Stopped at role: ${role}`
+        );
+      }
       throw new Error(`[ads] getAdInfo failed for ${role} (${adId}): ${err.message}`);
     }
 
-    // Log the raw response once so we can see actual field names.
     console.log(`[ads] Raw getAdInfo(${role}):`, JSON.stringify(info).slice(0, 500));
 
-    // Tolerate several possible field names — adjust once we see the real shape.
     const token = info.tokenId || info.token || info.coin;
     const side = info.side !== undefined ? Number(info.side) : (role === ROLES.USDC_SELL ? 1 : 0);
     const price = Number(info.price) || 0;
@@ -58,8 +60,7 @@ async function mapRolesToAdIds() {
     mapping[role] = adId;
     console.log(`[ads] Mapped ${role} → ${adId} (${token}, price=${price}, qty=${lastQty})`);
 
-    // Rate-limit guard: 1.5s between ad info calls
-    await sleep(1500);
+    await sleep(3000);
   }
 
   console.log('[ads] Hardcoded ad mapping complete.');
