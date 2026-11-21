@@ -1,5 +1,6 @@
 // src/bybit/ads.js
 // Ad registry with hardcoded Ad IDs.
+// Unwraps the SDK's { ret_code, result: {...} } envelope.
 // Fails loudly on any error. Aborts immediately on rate limit.
 
 const { client, BybitError } = require('./client');
@@ -30,9 +31,9 @@ async function mapRolesToAdIds() {
       throw new Error(`[ads] Missing hardcoded Ad ID for role "${role}".`);
     }
 
-    let info;
+    let raw;
     try {
-      info = await client.getAdInfo(adId);
+      raw = await client.getAdInfo(adId);
     } catch (err) {
       if (err.message && err.message.includes('10006')) {
         throw new Error(
@@ -42,17 +43,18 @@ async function mapRolesToAdIds() {
       throw new Error(`[ads] getAdInfo failed for ${role} (${adId}): ${err.message}`);
     }
 
-    console.log(`[ads] Raw getAdInfo(${role}):`, JSON.stringify(info).slice(0, 500));
+    // SDK wraps the ad data in { ret_code, ret_msg, result: {...} }
+    const data = raw.result || raw;
 
-    const token = info.tokenId || info.token || info.coin;
-    const side = info.side !== undefined ? Number(info.side) : (role === ROLES.USDC_SELL ? 1 : 0);
-    const price = Number(info.price) || 0;
-    const lastQty = Number(info.lastQuantity || info.quantity) || 0;
+    const token = data.tokenId || data.token || data.coin;
+    const side = data.side !== undefined ? Number(data.side) : (role === ROLES.USDC_SELL ? 1 : 0);
+    const price = Number(data.price) || 0;
+    const lastQty = Number(data.lastQuantity || data.quantity) || 0;
 
     if (!token) {
       throw new Error(
         `[ads] getAdInfo(${role}) returned no recognizable token field. ` +
-        `Saw keys: ${Object.keys(info).join(', ')}`
+        `Saw keys: ${Object.keys(data).join(', ')}`
       );
     }
 
@@ -75,7 +77,8 @@ function getAdId(role) {
 
 async function fetchAdInfo(role) {
   const adId = getAdId(role);
-  return client.getAdInfo(adId);
+  const raw = await client.getAdInfo(adId);
+  return raw.result || raw;
 }
 
 async function updateAd(role, { price, quantity, minAmount, maxAmount, paymentIds }) {
