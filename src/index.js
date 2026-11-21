@@ -7,6 +7,8 @@
 //   5. Runs daily report at 23:50 Lagos
 //   6. Handles graceful shutdown
 
+const http = require('http');
+
 require('dotenv').config();
 
 const config = require('./config');
