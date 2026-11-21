@@ -1,12 +1,11 @@
 // src/bybit/ads.js
 // Ad registry with hardcoded Ad IDs.
-// Bypasses the empty getAdsList() response by using the IDs you provide.
+// Fails loudly if any ad can't be loaded. Never writes dummy rows.
 
 const { client, BybitError } = require('./client');
 const db = require('../db/db');
 const config = require('../config');
 
-// Roles the bot manages
 const ROLES = {
   USDT_BUY: 'usdt_buy',
   USDC_SMALL_BUY: 'usdc_small_buy',
@@ -14,9 +13,6 @@ const ROLES = {
   USDC_SELL: 'usdc_sell',
 };
 
-// ── HARDCODED AD IDs ────────────────────────────────────────
-// Paste your real Bybit Ad IDs here. Find them on the Bybit P2P page:
-// click each ad, look at the URL or ad details for the ID.
 const AD_IDS = {
   [ROLES.USDT_BUY]: '2048155803803877376',
   [ROLES.USDC_SMALL_BUY]: '2116820960323358720',
@@ -24,61 +20,65 @@ const AD_IDS = {
   [ROLES.USDC_SELL]: '2116798411379228672',
 };
 
-// ── Map roles to ad IDs ─────────────────────────────────────
-// Uses hardcoded IDs. Fetches ad details once to populate the DB.
+// Delay helper — Bybit P2P rate limit is strict. Space out calls.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function mapRolesToAdIds() {
-  // Validate that real IDs were provided
+  const mapping = {};
+
   for (const [role, adId] of Object.entries(AD_IDS)) {
     if (!adId || adId.startsWith('PASTE_')) {
-      throw new Error(
-        `[ads] Missing hardcoded Ad ID for role "${role}". ` +
-        `Edit src/bybit/ads.js and replace the placeholder.`
-      );
+      throw new Error(`[ads] Missing hardcoded Ad ID for role "${role}".`);
     }
-  }
 
-  // Fetch details for each ad and persist
-  for (const [role, adId] of Object.entries(AD_IDS)) {
+    let info;
     try {
-      const info = await client.getAdInfo(adId);
-      db.ads.upsert(
-        role,
-        adId,
-        info.tokenId,
-        Number(info.side),
-        Number(info.price) || 0,
-        Number(info.lastQuantity) || 0
-      );
-      console.log(`[ads] Mapped ${role} → ${adId} (${info.tokenId}, price=${info.price})`);
+      info = await client.getAdInfo(adId);
     } catch (err) {
-      console.error(`[ads] Failed to fetch details for ${role} (${adId}): ${err.message}`);
-      // Still store the ID so the bot doesn't crash, but log the error
-      db.ads.upsert(role, adId, 'UNKNOWN', 0, 0, 0);
+      throw new Error(`[ads] getAdInfo failed for ${role} (${adId}): ${err.message}`);
     }
+
+    // Log the raw response once so we can see actual field names.
+    console.log(`[ads] Raw getAdInfo(${role}):`, JSON.stringify(info).slice(0, 500));
+
+    // Tolerate several possible field names — adjust once we see the real shape.
+    const token = info.tokenId || info.token || info.coin;
+    const side = info.side !== undefined ? Number(info.side) : (role === ROLES.USDC_SELL ? 1 : 0);
+    const price = Number(info.price) || 0;
+    const lastQty = Number(info.lastQuantity || info.quantity) || 0;
+
+    if (!token) {
+      throw new Error(
+        `[ads] getAdInfo(${role}) returned no recognizable token field. ` +
+        `Saw keys: ${Object.keys(info).join(', ')}`
+      );
+    }
+
+    db.ads.upsert(role, adId, token, side, price, lastQty);
+    mapping[role] = adId;
+    console.log(`[ads] Mapped ${role} → ${adId} (${token}, price=${price}, qty=${lastQty})`);
+
+    // Rate-limit guard: 1.5s between ad info calls
+    await sleep(1500);
   }
 
   console.log('[ads] Hardcoded ad mapping complete.');
-  return AD_IDS;
+  return mapping;
 }
 
-// ── Get ad ID for a role ────────────────────────────────────
 function getAdId(role) {
   const row = db.ads.get(role);
   if (!row) throw new Error(`[ads] No ad ID mapped for role "${role}". Run mapRolesToAdIds() first.`);
   return row.ad_id;
 }
 
-// ── Fetch full ad info ──────────────────────────────────────
 async function fetchAdInfo(role) {
   const adId = getAdId(role);
-  const result = await client.getAdInfo(adId);
-  return result;
+  return client.getAdInfo(adId);
 }
 
-// ── Read-modify-write update with verify ────────────────────
 async function updateAd(role, { price, quantity, minAmount, maxAmount, paymentIds }) {
   const adId = getAdId(role);
-
   const before = await fetchAdInfo(role);
 
   const params = {
@@ -116,18 +116,15 @@ async function updateAd(role, { price, quantity, minAmount, maxAmount, paymentId
 
   db.editLog.record(role);
   db.ads.updateState(role, Number(after.price), Number(after.lastQuantity));
-
   return after;
 }
 
-// ── Update ad state in DB without editing ───────────────────
 async function refreshAdState(role) {
   const info = await fetchAdInfo(role);
   db.ads.updateState(role, Number(info.price), Number(info.lastQuantity));
   return info;
 }
 
-// ── Rate-limit guard ────────────────────────────────────────
 function canEditAd(role) {
   const lastEdit = db.editLog.lastEditAt(role);
   const throttleMs = config.sell.editThrottleSeconds * 1000;
