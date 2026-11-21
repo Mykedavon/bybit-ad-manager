@@ -1,12 +1,11 @@
 // src/index.js
 // Entry point. Starts the bot:
 //   1. Maps ad IDs to roles (with retry)
-//   2. Launches Telegram
-//   3. Runs sell loop every 60s
-//   4. Runs buy loop every 5 min
-//   5. Runs daily report at 23:50 Lagos
-//   6. Serves HTTP health endpoint for Render Web Service
-//   7. Handles graceful shutdown
+//   2. Starts sell + buy loops immediately
+//   3. Launches Telegram (non-blocking)
+//   4. Runs daily report at 23:50 Lagos
+//   5. Serves HTTP health endpoint for Render Web Service
+//   6. Handles graceful shutdown
 
 const http = require('http');
 
@@ -37,12 +36,6 @@ function createLoop(name, intervalMs, fn) {
       console.log(`[${name}]`, JSON.stringify(result).slice(0, 500));
     } catch (err) {
       console.error(`[${name}] error:`, err.message);
-      telegram.send(
-        config.telegram.ownerChatId,
-        `⚠️ ${name} error: ${err.message}`,
-        {},
-        config.telegram.operationalRetentionMinutes
-      ).catch(() => {});
     } finally {
       running = false;
     }
@@ -126,7 +119,7 @@ function scheduleReconciliation() {
 async function main() {
   console.log('[startup] loading config…');
 
-  // 1. Start HTTP health endpoint IMMEDIATELY
+  // 1. HTTP health endpoint (starts immediately)
   const PORT = process.env.PORT || 3000;
   const httpServer = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -136,7 +129,7 @@ async function main() {
     console.log(`[http] health endpoint on port ${PORT}`);
   });
 
-  // 2. Map ad IDs to roles. On failure, retry every 5 min — never exit.
+  // 2. Map ad IDs (with retry)
   let adMappingOk = false;
   const tryMapAds = async () => {
     try {
@@ -151,7 +144,7 @@ async function main() {
       console.error('code:', err.code);
       console.error('raw:', JSON.stringify(err.raw || err, null, 2));
       console.error('stack:', err.stack);
-      console.error('Will retry every 5 minutes. HTTP health endpoint still responds.');
+      console.error('Will retry every 5 minutes.');
       return false;
     }
   };
@@ -172,17 +165,8 @@ async function main() {
   // 3. Wire Telegram notifier into buyManager
   buyManager.setTelegramNotifier(telegram);
 
-  // 4. Launch Telegram (guard so a bad token doesn't kill the HTTP server)
-  try {
-    await telegram.launch();
-    await telegram.sendStartupMessage();
-    console.log('[telegram] launch OK');
-  } catch (err) {
-    console.error('[telegram] launch failed —', err.message);
-    console.error('Continuing without Telegram. Fix TELEGRAM_* env vars and redeploy.');
-  }
-
-  // 5. Start loops (they will no-op until ad mapping succeeds)
+  // 4. Start loops FIRST — before Telegram, so trading runs
+  //    even if Telegram is broken.
   const sellLoop = createLoop(
     'sell',
     config.sell.cycleSeconds * 1000,
@@ -203,13 +187,24 @@ async function main() {
 
   sellLoop.start();
   buyLoop.start();
+  console.log('[startup] loops started');
+
+  // 5. Launch Telegram (non-blocking for trading)
+  try {
+    await telegram.launch();
+    await telegram.sendStartupMessage();
+    console.log('[telegram] launch OK');
+  } catch (err) {
+    console.error('[telegram] launch failed —', err.message);
+    console.error('Trading continues without Telegram.');
+  }
 
   // 6. Start schedulers
   const dailyReportTimer = scheduleDailyReport();
   const expiryTimer = scheduleExpiryChecks();
   const reconcileTimer = scheduleReconciliation();
 
-  console.log('[startup] all loops running');
+  console.log('[startup] all systems running');
 
   // ── Graceful shutdown ────────────────────────────────────
   const shutdown = (signal) => {
@@ -230,12 +225,6 @@ async function main() {
 
   process.on('uncaughtException', (err) => {
     console.error('[uncaught]', err);
-    telegram.send(
-      config.telegram.ownerChatId,
-      `🔥 Uncaught exception: ${err.message}\n${err.stack?.slice(0, 400)}`,
-      {},
-      config.telegram.operationalRetentionMinutes
-    ).catch(() => {});
   });
 
   process.on('unhandledRejection', (err) => {
