@@ -235,6 +235,16 @@ async function main() {
     ).catch(() => {});
   });
 
+
+  } catch (err) {
+  console.error('[startup] ad mapping failed — FULL ERROR:');
+  console.error('name:', err.name);
+  console.error('message:', err.message);
+  console.error('code:', err.code);
+  console.error('raw:', JSON.stringify(err.raw || err, null, 2));
+  console.error('stack:', err.stack);
+}
+
   process.on('unhandledRejection', (err) => {
     console.error('[unhandledRejection]', err);
   });
