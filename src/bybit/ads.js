@@ -15,44 +15,44 @@ const ROLES = {
 };
 
 // ── Role → matching rules ────────────────────────────────────
-// Used on startup to map ad IDs to roles by inspecting each ad's
-// token, side, and minAmount. Survives ad deletion/recreation.
+// Resilient to type/case differences in Bybit's response.
 const ROLE_MATCHERS = [
   {
     role: ROLES.USDT_BUY,
     match: (ad) =>
-      ad.tokenId === config.tokens.buy1 &&
-      ad.side === 0 &&
-      Number(ad.minAmount) === config.buy.minUsdtNgn,
+      ad.tokenId?.toUpperCase() === config.tokens.buy1?.toUpperCase() &&
+      Number(ad.side) === 0 &&
+      Math.abs(Number(ad.minAmount) - config.buy.minUsdtNgn) < 1,
   },
   {
     role: ROLES.USDC_SMALL_BUY,
     match: (ad) =>
-      ad.tokenId === config.tokens.buy2 &&
-      ad.side === 0 &&
-      Number(ad.minAmount) === config.buy.minUsdcSmallNgn,
+      ad.tokenId?.toUpperCase() === config.tokens.buy2?.toUpperCase() &&
+      Number(ad.side) === 0 &&
+      Math.abs(Number(ad.minAmount) - config.buy.minUsdcSmallNgn) < 1,
   },
   {
     role: ROLES.USDC_LARGE_BUY,
     match: (ad) =>
-      ad.tokenId === config.tokens.buy3 &&
-      ad.side === 0 &&
-      Number(ad.minAmount) === config.buy.minUsdcLargeNgn,
+      ad.tokenId?.toUpperCase() === config.tokens.buy3?.toUpperCase() &&
+      Number(ad.side) === 0 &&
+      Math.abs(Number(ad.minAmount) - config.buy.minUsdcLargeNgn) < 1,
   },
   {
     role: ROLES.USDC_SELL,
     match: (ad) =>
-      ad.tokenId === config.tokens.sell &&
-      ad.side === 1,
+      ad.tokenId?.toUpperCase() === config.tokens.sell?.toUpperCase() &&
+      Number(ad.side) === 1,
   },
 ];
 
 // ── Map roles to ad IDs ─────────────────────────────────────
-// Called on startup. Fetches all your ads, matches each to a role,
-// persists the mapping. Throws if any role can't be matched.
 async function mapRolesToAdIds() {
   const result = await client.getMyAds();
   const ads = result.items || [];
+
+  // Debug log — prints the raw ads so you can see exact field values.
+  console.log('[ads] Raw ads from Bybit:', JSON.stringify(ads, null, 2));
 
   const mapping = {};
 
@@ -75,7 +75,7 @@ async function mapRolesToAdIds() {
       role,
       adId,
       ad.tokenId,
-      ad.side,
+      Number(ad.side),
       Number(ad.price) || 0,
       Number(ad.lastQuantity) || 0
     );
@@ -99,39 +99,28 @@ async function fetchAdInfo(role) {
 }
 
 // ── Read-modify-write update with verify ────────────────────
-// The only way the bot should ever edit an ad.
-// 1. Read current ad state
-// 2. Apply only the requested changes (price and/or quantity)
-// 3. Submit update with FULL parameter set (never partial)
-// 4. Re-fetch and verify the change landed
-// 5. Record edit timestamp for rate limiting
 async function updateAd(role, { price, quantity, minAmount, maxAmount, paymentIds }) {
   const adId = getAdId(role);
 
-  // 1. Read current state
   const before = await fetchAdInfo(role);
 
-  // 2. Build the full parameter set. Start from current values,
-  //    override only what was requested.
-const params = {
-  id: adId,
-  priceType: before.priceType || '0',
-  premium: before.premium || '',
-  price: price !== undefined ? String(price) : before.price,
-  quantity: quantity !== undefined ? String(quantity) : before.quantity,
-  minAmount: minAmount !== undefined ? String(minAmount) : before.minAmount,
-  maxAmount: maxAmount !== undefined ? String(maxAmount) : before.maxAmount,
-  remark: before.remark || '',
-  tradingPreferenceSet: before.tradingPreferenceSet || {},
-  paymentIds: paymentIds || before.payments || [],
-  actionType: 'MODIFY',
-  paymentPeriod: before.paymentPeriod || '15',
-};
+  const params = {
+    id: adId,
+    priceType: before.priceType || '0',
+    premium: before.premium || '',
+    price: price !== undefined ? String(price) : before.price,
+    quantity: quantity !== undefined ? String(quantity) : before.quantity,
+    minAmount: minAmount !== undefined ? String(minAmount) : before.minAmount,
+    maxAmount: maxAmount !== undefined ? String(maxAmount) : before.maxAmount,
+    remark: before.remark || '',
+    tradingPreferenceSet: before.tradingPreferenceSet || {},
+    paymentIds: paymentIds || before.payments || [],
+    actionType: 'MODIFY',
+    paymentPeriod: before.paymentPeriod || '15',
+  };
 
-  // 3. Submit
   await client.updateAd(params);
 
-  // 4. Verify
   const after = await fetchAdInfo(role);
 
   const priceOk = price === undefined || Math.abs(Number(after.price) - Number(price)) < 0.001;
@@ -148,7 +137,6 @@ const params = {
     );
   }
 
-  // 5. Record edit for rate-limit tracking
   db.editLog.record(role);
   db.ads.updateState(role, Number(after.price), Number(after.lastQuantity));
 
@@ -156,8 +144,6 @@ const params = {
 }
 
 // ── Update ad state in DB without editing ───────────────────
-// Used after external events (like a sale completing) to keep
-// local records fresh without touching the ad.
 async function refreshAdState(role) {
   const info = await fetchAdInfo(role);
   db.ads.updateState(role, Number(info.price), Number(info.lastQuantity));
@@ -165,7 +151,6 @@ async function refreshAdState(role) {
 }
 
 // ── Rate-limit guard ────────────────────────────────────────
-// Before calling updateAd, check if we're allowed to edit this ad yet.
 function canEditAd(role) {
   const lastEdit = db.editLog.lastEditAt(role);
   const throttleMs = config.sell.editThrottleSeconds * 1000;
